@@ -167,9 +167,15 @@ class TranslationMetrics:
         - completed_chunks accounts for both translation and refinement progress
         - Phase 1 (translation): 0-50% of total work (0 to N chunks)
         - Phase 2 (refinement): 50-100% of total work (N to 2N chunks)
-        
+
         Note: We use processed_chunks for translation progress to avoid fluctuations
         during retries. A chunk is only counted when fully processed (success or failure).
+
+        Serialization caveat: the "total_chunks" key in this dict is the
+        *effective* value (doubled when refinement is on) so the UI can
+        render it directly. The raw count is also written under the
+        "_raw_total_chunks" key so `from_dict` can round-trip without
+        compounding the doubling across stop/resume cycles.
         """
         # Calculate total chunks and completed chunks based on refinement status
         if self.enable_refinement:
@@ -190,6 +196,10 @@ class TranslationMetrics:
 
         return {
             "total_chunks": effective_total_chunks,
+            # Raw count for safe round-trip via from_dict. Without this, every
+            # save/resume cycle would re-double total_chunks for refinement
+            # workflows, eventually overflowing the progress counter.
+            "_raw_total_chunks": self.total_chunks,
             "completed_chunks": effective_completed,
             "successful_first_try": self.successful_first_try,
             "successful_after_retry": self.successful_after_retry,
@@ -234,12 +244,33 @@ class TranslationMetrics:
         """
         metrics = cls()
 
-        # Basic counts
-        metrics.total_chunks = data.get("total_chunks", 0)
+        # Basic counts. Prefer the explicit raw field written by to_dict (new
+        # format); fall back to the legacy "total_chunks" key and undo the
+        # refinement-driven doubling so an old state file does not stay
+        # inflated. Without this halving, each save/resume cycle would
+        # double the value, eventually showing > 100 % in the UI.
+        enable_refinement_loaded = data.get("enable_refinement", False)
+        if "_raw_total_chunks" in data:
+            metrics.total_chunks = int(data["_raw_total_chunks"])
+        else:
+            legacy_total = int(data.get("total_chunks", 0))
+            if enable_refinement_loaded and legacy_total > 0:
+                metrics.total_chunks = legacy_total // 2
+            else:
+                metrics.total_chunks = legacy_total
         metrics.successful_first_try = data.get("successful_first_try", 0)
         metrics.successful_after_retry = data.get("successful_after_retry", 0)
         metrics.fallback_used = data.get("fallback_used", 0)
         metrics.failed_chunks = data.get("failed_chunks", 0)
+
+        # Progress tracking. processed_chunks must round-trip via from_dict
+        # so resumes can rely on its cumulative semantics for global progress
+        # accounting (translator.py uses it as the source of truth for "this
+        # file has been processed up to chunk N").
+        metrics.processed_chunks = data.get("processed_chunks", 0)
+        metrics.refinement_chunks_completed = data.get("refinement_chunks_completed", 0)
+        metrics.enable_refinement = data.get("enable_refinement", False)
+        metrics.refinement_phase = data.get("refinement_phase", False)
 
         # Retry & error tracking
         metrics.retry_attempts = data.get("retry_attempts", 0)

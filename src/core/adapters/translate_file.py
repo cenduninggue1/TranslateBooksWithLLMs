@@ -20,6 +20,11 @@ from .srt_adapter import SrtAdapter
 from .epub_adapter import EpubAdapter
 from .exceptions import UnsupportedFormatError
 from src.utils.file_detector import detect_file_type, detect_file_type_by_content
+from src.config import PARALLEL_REQUESTS_MAX
+
+# Providers that run on local hardware: concurrent requests fight for the same
+# GPU/CPU and hurt rather than help. Force parallel_requests=1 for these.
+_LOCAL_PROVIDERS = frozenset({"ollama"})
 
 
 async def translate_file(
@@ -48,6 +53,7 @@ async def translate_file(
     min_chunk_size: int = 5,
     prompt_options: Optional[Dict[str, Any]] = None,
     bilingual_output: bool = False,
+    parallel_requests: int = 1,
     **additional_config
 ) -> bool:
     """
@@ -113,6 +119,18 @@ async def translate_file(
     if prompt_options is None:
         prompt_options = {}
 
+    # Resolve effective parallel_requests: cap to [1, PARALLEL_REQUESTS_MAX]
+    # and force 1 for local providers (single GPU/CPU can't benefit from
+    # concurrent requests).
+    parallel_requests = max(1, min(int(parallel_requests), PARALLEL_REQUESTS_MAX))
+    if llm_provider.lower() in _LOCAL_PROVIDERS and parallel_requests > 1:
+        if log_callback:
+            log_callback(
+                "parallel_requests_forced_local",
+                f"Local provider '{llm_provider}' detected: forcing parallel_requests=1"
+            )
+        parallel_requests = 1
+
     # Detect file format - first by extension, then by content for unknown extensions
     _, ext = os.path.splitext(input_filepath.lower())
 
@@ -166,6 +184,7 @@ async def translate_file(
             resume_from_index=resume_from_index,
             prompt_options=prompt_options,
             bilingual=bilingual_output,
+            parallel_requests=parallel_requests,
             **additional_config
         )
         return True  # Legacy function doesn't return success status
@@ -269,6 +288,7 @@ async def translate_file(
         stats_callback=stats_callback,
         check_interruption_callback=check_interruption_callback,
         bilingual_output=bilingual_output,
+        parallel_requests=parallel_requests,
         **llm_config
     )
 

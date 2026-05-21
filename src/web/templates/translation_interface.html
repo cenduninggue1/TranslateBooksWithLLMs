@@ -711,6 +711,23 @@
                         </label>
                     </div>
 
+                    <!-- Parallel requests for cloud providers -->
+                    <div class="option-item" id="parallelRequestsOption">
+                        <label class="option-item__label" style="align-items: flex-start;">
+                            <div style="display: flex; align-items: center; gap: 0.5rem; flex-shrink: 0; padding-top: 2px;">
+                                <input type="number" id="parallelRequests" min="1" max="8" step="1" value="1"
+                                       style="width: 64px; padding: 6px 8px; text-align: center;">
+                            </div>
+                            <div>
+                                <span class="option-item__title">Parallel requests to the LLM</span>
+                                <p class="option-item__description">
+                                    Number of translation chunks dispatched concurrently to the cloud provider (default <code>1</code>, max <code>8</code>). Higher values cut wall-clock time roughly proportionally on large books: a 4-hour translation at <code>1</code> typically drops to ~1 hour at <code>4</code>. Start at <code>2</code> or <code>3</code> on free-tier accounts to stay below their rate limits, and try <code>4</code>-<code>8</code> on paid keys.<br><br>
+                                    <strong>Automatically forced to 1 for Ollama</strong> (and other local models): concurrent requests fight for the same GPU and would only slow things down.
+                                </p>
+                            </div>
+                        </label>
+                    </div>
+
                     <!-- Save Settings Button -->
                     <div class="form-group" style="margin-top: 20px; padding-top: 15px; border-top: 1px solid var(--border-color);">
                         <button type="button" id="saveSettingsBtn" class="btn btn-primary" style="width: 100%;" onclick="saveSettings()" disabled>

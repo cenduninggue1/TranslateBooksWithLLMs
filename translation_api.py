@@ -1,6 +1,11 @@
 """
 Flask web server for translation API with WebSocket support
 """
+# Make stdout/stderr safe for emoji on Windows consoles BEFORE any module
+# that prints non-ASCII characters is imported. See src/utils/stdio_setup.py.
+from src.utils.stdio_setup import configure_stdio_utf8
+configure_stdio_utf8()
+
 # Force-register correct MIME types BEFORE importing Flask, so any module that
 # eagerly initializes mimetypes during import sees the overrides.
 # On Windows, mimetypes.init() reads from HKCR registry, and some installs have
@@ -39,11 +44,11 @@ logging.getLogger('werkzeug').setLevel(logging.WARNING)
 # Reduce verbosity of httpx (avoid showing 400 errors during model detection)
 logging.getLogger('httpx').setLevel(logging.WARNING)
 
-# Fix Windows console encoding for emojis
-if sys.platform == 'win32':
-    import codecs
-    sys.stdout = codecs.getwriter('utf-8')(sys.stdout.buffer, 'replace')
-    sys.stderr = codecs.getwriter('utf-8')(sys.stderr.buffer, 'replace')
+# Windows console encoding for emoji is handled by configure_stdio_utf8() at
+# the top of this file. Do not re-wrap sys.stdout here — replacing the
+# TextIOWrapper with a codecs.StreamWriter breaks consumers that expect
+# TextIOWrapper semantics (e.g. some logging paths) and re-introduces the
+# very crash this is meant to prevent.
 
 from src.config import (
     API_ENDPOINT as DEFAULT_OLLAMA_API_ENDPOINT,

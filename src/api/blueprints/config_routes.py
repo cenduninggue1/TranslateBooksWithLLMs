@@ -168,7 +168,8 @@ def create_config_blueprint(server_session_id=None):
             "poe_api_key_configured": poe_count > 0,
             "nim_api_key_configured": nim_count > 0,
             "output_filename_pattern": _config.OUTPUT_FILENAME_PATTERN,
-            "disable_auto_pause": str(_config.DISABLE_AUTO_PAUSE).strip().lower() == 'true'
+            "disable_auto_pause": str(_config.DISABLE_AUTO_PAUSE).strip().lower() == 'true',
+            "parallel_requests": _config.PARALLEL_REQUESTS,
         }
 
         return jsonify(config_response)
@@ -943,7 +944,8 @@ def create_config_blueprint(server_session_id=None):
             'OLLAMA_API_ENDPOINT',
             'OPENAI_API_ENDPOINT',
             'OUTPUT_FILENAME_PATTERN',
-            'DISABLE_AUTO_PAUSE'
+            'DISABLE_AUTO_PAUSE',
+            'PARALLEL_REQUESTS',
         }
 
         try:

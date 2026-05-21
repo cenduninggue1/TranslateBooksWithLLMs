@@ -185,7 +185,8 @@ export const SettingsManager = {
             { id: 'deepseekApiKey', event: 'input' },
             { id: 'poeApiKey', event: 'input' },
             { id: 'nimApiKey', event: 'input' },
-            { id: 'disableAutoPause', event: 'change' }
+            { id: 'disableAutoPause', event: 'change' },
+            { id: 'parallelRequests', event: 'input' }
         ];
 
         envDirtyElements.forEach(({ id, event }) => {
@@ -579,6 +580,14 @@ export const SettingsManager = {
             // Save disable auto-pause flag (runtime behavior default)
             const disableAutoPauseCheckbox = DomHelpers.getElement('disableAutoPause');
             envSettings['DISABLE_AUTO_PAUSE'] = (disableAutoPauseCheckbox && disableAutoPauseCheckbox.checked) ? 'true' : 'false';
+
+            // Save parallel requests setting (clamped to [1, 8]).
+            const parallelInput = DomHelpers.getElement('parallelRequests');
+            if (parallelInput) {
+                const parsed = parseInt(parallelInput.value, 10);
+                const clamped = Math.max(1, Math.min(8, Number.isFinite(parsed) ? parsed : 1));
+                envSettings['PARALLEL_REQUESTS'] = String(clamped);
+            }
 
             // Also save provider and model as defaults
             envSettings['LLM_PROVIDER'] = provider;

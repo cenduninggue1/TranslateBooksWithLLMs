@@ -447,6 +447,15 @@ export const FormManager = {
                     disableAutoPauseCheckbox.checked = config.disable_auto_pause;
                 }
             }
+            // Parallel requests (default from PARALLEL_REQUESTS env var)
+            if (typeof config.parallel_requests === 'number') {
+                const parallelInput = DomHelpers.getElement('parallelRequests');
+                if (parallelInput) {
+                    parallelInput.value = String(
+                        Math.max(1, Math.min(8, config.parallel_requests))
+                    );
+                }
+            }
             // Handle API keys - show indicator if configured in .env, otherwise keep placeholder
             ApiKeyUtils.setupField('geminiApiKey', config.gemini_api_key_configured, config.gemini_api_key, config.gemini_api_key_count);
             ApiKeyUtils.setupField('openaiApiKey', config.openai_api_key_configured, config.openai_api_key, config.openai_api_key_count);
@@ -698,6 +707,8 @@ export const FormManager = {
             bilingual_output: DomHelpers.getElement('bilingualMode')?.checked || false,
             // Disable auto-pause on rate limit (auto-resume after Retry-After)
             auto_pause_on_rate_limit: !(DomHelpers.getElement('disableAutoPause')?.checked || false),
+            // Parallel requests to the cloud provider (forced to 1 server-side for Ollama)
+            parallel_requests: Math.max(1, Math.min(8, parseInt(DomHelpers.getValue('parallelRequests') || '1', 10) || 1)),
             // TTS configuration
             tts_enabled: ttsEnabled,
             tts_voice: ttsEnabled ? (DomHelpers.getValue('ttsVoice') || '') : '',

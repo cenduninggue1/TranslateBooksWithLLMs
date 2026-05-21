@@ -612,6 +612,26 @@ export const ProviderManager = {
             if (nimSettings) nimSettings.style.display = 'block';
             if (loadModels) this.loadNimModels();
         }
+
+        // Disable the parallel-requests input for local providers (Ollama).
+        // Mirrors the server-side gating in translate_file(): concurrent
+        // requests against a single local GPU hurt throughput, so the
+        // backend forces parallel_requests=1 anyway. We disable the input
+        // here so it's clear to the user that the field has no effect.
+        const parallelInput = DomHelpers.getElement('parallelRequests');
+        const parallelOption = DomHelpers.getElement('parallelRequestsOption');
+        if (parallelInput && parallelOption) {
+            const isLocal = provider === 'ollama';
+            parallelInput.disabled = isLocal;
+            if (isLocal) {
+                parallelInput.value = '1';
+                parallelOption.style.opacity = '0.55';
+                parallelOption.title = 'Local providers (Ollama) cannot benefit from concurrency: forced to 1.';
+            } else {
+                parallelOption.style.opacity = '';
+                parallelOption.title = '';
+            }
+        }
     },
 
     /**

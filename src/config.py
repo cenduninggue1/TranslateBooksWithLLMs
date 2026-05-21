@@ -222,6 +222,13 @@ MAX_CHUNK_SIZE = int(os.getenv("MAX_CHUNK_SIZE", "100"))
 MAX_TOKENS_PER_CHUNK = int(os.getenv('MAX_TOKENS_PER_CHUNK', '450'))
 SOFT_LIMIT_RATIO = float(os.getenv('SOFT_LIMIT_RATIO', '0.8'))
 
+# Parallel API requests for non-local providers (GitHub issue #175).
+# Translation segments (chapters for EPUB, contiguous chunk slices for TXT/SRT)
+# are dispatched concurrently. Local providers like Ollama are forced to 1 in
+# translate_file() since concurrency hurts on a single local GPU.
+PARALLEL_REQUESTS_MAX = 8
+PARALLEL_REQUESTS = max(1, min(int(os.getenv('PARALLEL_REQUESTS', '1')), PARALLEL_REQUESTS_MAX))
+
 # === Translation Buffer Configuration ===
 TRANSLATION_OUTPUT_MULTIPLIER = 2
 """Multiplicateur pour la longueur de sortie estimée (certaines langues cibles
@@ -333,6 +340,11 @@ def reload_config():
     """
     load_dotenv(_env_file, override=True)
     _apply_reloadable_env_settings()
+    # PARALLEL_REQUESTS is a clamped int (not a raw string like the entries
+    # in _RELOADABLE_ENV_SETTINGS), so it has to be re-evaluated by hand.
+    globals()['PARALLEL_REQUESTS'] = max(
+        1, min(int(os.getenv('PARALLEL_REQUESTS', '1')), PARALLEL_REQUESTS_MAX)
+    )
     if _debug_mode or os.getenv('DEBUG_MODE', 'false').lower() == 'true':
         _config_logger.debug("📋 Configuration reloaded from .env")
 

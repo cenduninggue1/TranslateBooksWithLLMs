@@ -175,8 +175,11 @@ export const ProgressManager = {
                 ? (data.stats.total_subtitles || 0)
                 : (data.stats.total_chunks || 0);
 
-            // Calculate progress percentage
-            const progress = total > 0 ? (completed / total) * 100 : 0;
+            // Calculate progress percentage. Clamp to [0, 100] so a transient
+            // server-side overshoot (e.g. a stale stat snapshot during
+            // parallel translation) cannot make the bar overflow visually.
+            const raw = total > 0 ? (completed / total) * 100 : 0;
+            const progress = Math.max(0, Math.min(100, raw));
             updateProgressBar(progress);
 
             // Update statistics display

@@ -7,6 +7,12 @@ import sys
 import shutil
 from pathlib import Path
 
+# Make stdout/stderr UTF-8 before any subprocess inherits them. Otherwise
+# the spawned server crashes the first time a provider prints an emoji on
+# Windows (cp1252), silently turning successful LLM calls into failures.
+from src.utils.stdio_setup import configure_stdio_utf8
+configure_stdio_utf8()
+
 def setup_working_directory():
     """Setup proper working directory for the executable"""
 

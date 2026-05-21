@@ -5,7 +5,9 @@ This module provides a unified translation workflow that works with any file for
 through the FormatAdapter interface.
 """
 
-from typing import Callable, Optional, Dict, Any
+import asyncio
+import math
+from typing import Callable, List, Optional, Dict, Any, Tuple
 from pathlib import Path
 
 from .format_adapter import FormatAdapter
@@ -59,6 +61,7 @@ class GenericTranslator:
         stats_callback: Optional[Callable] = None,
         check_interruption_callback: Optional[Callable] = None,
         bilingual_output: bool = False,
+        parallel_requests: int = 1,
         **llm_kwargs
     ) -> bool:
         """
@@ -152,46 +155,64 @@ class GenericTranslator:
             )
 
             # 6. Translate each unit
-            last_context = ""
-            failed_count = 0
+            # Build the list of (global_index, unit) pairs that still need
+            # translation. We consult checkpoint_data (when resuming) for the
+            # set of already-completed indices; for a sequential interrupt this
+            # is contiguous, so the result equals range(resume_from, total),
+            # but for a parallel interrupt it correctly skips done chunks
+            # without skipping holes in the middle.
+            completed_indices = set()
+            if checkpoint_data:
+                for chunk_data in checkpoint_data.get('chunks', []):
+                    if chunk_data.get('status') == 'completed':
+                        ci = chunk_data.get('chunk_data', {}).get('chunk_index')
+                        if ci is not None:
+                            completed_indices.add(ci)
+            pending_pairs: List[Tuple[int, TranslationUnit]] = [
+                (i, units[i])
+                for i in range(total_units)
+                if i not in completed_indices
+            ]
 
-            for i, unit in enumerate(units):
-                if i < resume_from:
-                    continue
+            # Distribute pending units into N segments. Each segment runs
+            # sequentially (preserving previous_translation_context within the
+            # segment); segments run concurrently when parallel_requests > 1.
+            # Cap silently when parallel_requests exceeds the work available.
+            num_segments = max(1, min(parallel_requests, len(pending_pairs)))
+            if num_segments > 1:
+                seg_size = math.ceil(len(pending_pairs) / num_segments)
+                segments = [
+                    pending_pairs[k:k + seg_size]
+                    for k in range(0, len(pending_pairs), seg_size)
+                ]
+            else:
+                segments = [pending_pairs] if pending_pairs else []
 
-                # Check for interruption at the start of each unit
-                if check_interruption_callback and check_interruption_callback():
-                    if log_callback:
-                        log_callback("translation_interrupted",
-                            f"Translation interrupted at unit {i+1}/{total_units}")
+            # Shared state across segments. Locked because both `interrupted`
+            # and the counters are mutated from concurrent coroutines, and the
+            # stats_callback / checkpoint writes need to see a consistent view.
+            state_lock = asyncio.Lock()
+            shared_state = {
+                'failed_count': 0,
+                'completed_count': len(completed_indices),
+                'interrupted': False,
+            }
 
-                    # Try to save partial output for TXT/SRT (fast reconstruction)
-                    # For EPUB, partial output may not be valid, so we skip reconstruction
-                    if self.adapter.format_name in ['txt', 'srt']:
-                        try:
-                            if log_callback:
-                                log_callback("reconstruct_partial", "Saving partial output before interruption")
-                            output_bytes = await self.adapter.reconstruct_output(bilingual=bilingual_output)
-                            with open(self.adapter.output_file_path, 'wb') as f:
-                                f.write(output_bytes)
-                        except Exception as e:
-                            if log_callback:
-                                log_callback("reconstruct_partial_failed",
-                                    f"Could not save partial output: {str(e)}")
+            prompt_options_for_unit = llm_kwargs.get('prompt_options', {})
 
-                    # Mark as paused/interrupted
-                    self.checkpoint_manager.mark_paused(self.translation_id)
-                    return False
+            async def _translate_unit(i: int, unit: TranslationUnit, last_context: str) -> Optional[str]:
+                """
+                Translate a single unit and update shared state/checkpoint.
 
+                Returns the translated content (for context propagation) on
+                success, or None on failure. Re-raises RateLimitError so the
+                caller can abort the whole job (matches pre-parallel behavior).
+                """
                 if log_callback:
                     log_callback("unit_start",
                         f"Translating unit {i+1}/{total_units} ({unit.unit_id})")
 
-                # Translate unit
                 try:
-                    # Extract prompt_options from llm_kwargs if available
-                    prompt_options = llm_kwargs.get('prompt_options', {})
-
                     translated_content = await generate_translation_request(
                         main_content=unit.content,
                         context_before=unit.context_before,
@@ -202,62 +223,21 @@ class GenericTranslator:
                         model=model_name,
                         llm_client=llm_client,
                         log_callback=log_callback,
-                        prompt_options=prompt_options
+                        prompt_options=prompt_options_for_unit
                     )
-
-                    if translated_content:
-                        # Save via adapter
-                        save_success = await self.adapter.save_unit_translation(
-                            unit.unit_id,
-                            translated_content
-                        )
-
-                        if not save_success:
-                            if log_callback:
-                                log_callback("save_failed",
-                                    f"Failed to save translation for unit {unit.unit_id}")
-                            failed_count += 1
-                            continue
-
-                        # Save checkpoint
-                        self.checkpoint_manager.save_checkpoint(
-                            translation_id=self.translation_id,
-                            chunk_index=i,
-                            original_text=unit.content,
-                            translated_text=translated_content,
-                            chunk_data=unit.metadata,
-                            total_chunks=total_units,
-                            completed_chunks=i + 1
-                        )
-
-                        # Update stats
-                        if stats_callback:
-                            stats_callback({
-                                'total_chunks': total_units,
-                                'completed_chunks': i + 1,
-                                'failed_chunks': failed_count
-                            })
-
-                        # Update context for next unit
-                        last_context = (
-                            translated_content[-200:]
-                            if len(translated_content) > 200
-                            else translated_content
-                        )
-
-                        if log_callback:
-                            log_callback("unit_complete",
-                                f"Unit {i+1}/{total_units} translated successfully")
-
-                    else:
-                        # Translation failed
-                        if log_callback:
-                            log_callback("unit_failed",
-                                f"Failed to translate unit {i+1}/{total_units}")
-
-                        failed_count += 1
-
-                        # Save checkpoint with failure
+                except Exception as e:
+                    from src.core.llm.exceptions import RateLimitError
+                    if isinstance(e, RateLimitError):
+                        raise
+                    if log_callback:
+                        log_callback("unit_error",
+                            f"Error translating unit {i+1}/{total_units}: {str(e)}")
+                    async with state_lock:
+                        shared_state['failed_count'] += 1
+                        # update_job_progress does last-write-wins on the
+                        # fields it receives, so always pass the cumulative
+                        # counters — never a delta — otherwise the DB row's
+                        # failed_chunks would collapse to 1 on every failure.
                         self.checkpoint_manager.save_checkpoint(
                             translation_id=self.translation_id,
                             chunk_index=i,
@@ -265,29 +245,64 @@ class GenericTranslator:
                             translated_text=None,
                             chunk_data=unit.metadata,
                             total_chunks=total_units,
-                            failed_chunks=1
+                            completed_chunks=shared_state['completed_count'],
+                            failed_chunks=shared_state['failed_count'],
                         )
-
-                        # Update stats with failure
                         if stats_callback:
                             stats_callback({
                                 'total_chunks': total_units,
-                                'completed_chunks': i,
-                                'failed_chunks': failed_count
+                                'completed_chunks': shared_state['completed_count'],
+                                'failed_chunks': shared_state['failed_count'],
+                            })
+                    return None
+
+                if translated_content:
+                    save_success = await self.adapter.save_unit_translation(
+                        unit.unit_id, translated_content
+                    )
+                    if not save_success:
+                        if log_callback:
+                            log_callback("save_failed",
+                                f"Failed to save translation for unit {unit.unit_id}")
+                        async with state_lock:
+                            shared_state['failed_count'] += 1
+                            if stats_callback:
+                                stats_callback({
+                                    'total_chunks': total_units,
+                                    'completed_chunks': shared_state['completed_count'],
+                                    'failed_chunks': shared_state['failed_count'],
+                                })
+                        return None
+
+                    async with state_lock:
+                        shared_state['completed_count'] += 1
+                        self.checkpoint_manager.save_checkpoint(
+                            translation_id=self.translation_id,
+                            chunk_index=i,
+                            original_text=unit.content,
+                            translated_text=translated_content,
+                            chunk_data=unit.metadata,
+                            total_chunks=total_units,
+                            completed_chunks=shared_state['completed_count']
+                        )
+                        if stats_callback:
+                            stats_callback({
+                                'total_chunks': total_units,
+                                'completed_chunks': shared_state['completed_count'],
+                                'failed_chunks': shared_state['failed_count'],
                             })
 
-                except Exception as e:
-                    # Re-raise RateLimitError to trigger auto-pause
-                    from src.core.llm.exceptions import RateLimitError
-                    if isinstance(e, RateLimitError):
-                        raise
-
                     if log_callback:
-                        log_callback("unit_error",
-                            f"Error translating unit {i+1}/{total_units}: {str(e)}")
-                    failed_count += 1
+                        log_callback("unit_complete",
+                            f"Unit {i+1}/{total_units} translated successfully")
+                    return translated_content
 
-                    # Save checkpoint with failure
+                # translated_content is None / empty
+                if log_callback:
+                    log_callback("unit_failed",
+                        f"Failed to translate unit {i+1}/{total_units}")
+                async with state_lock:
+                    shared_state['failed_count'] += 1
                     self.checkpoint_manager.save_checkpoint(
                         translation_id=self.translation_id,
                         chunk_index=i,
@@ -295,16 +310,65 @@ class GenericTranslator:
                         translated_text=None,
                         chunk_data=unit.metadata,
                         total_chunks=total_units,
-                        failed_chunks=1
+                        completed_chunks=shared_state['completed_count'],
+                        failed_chunks=shared_state['failed_count'],
                     )
-
-                    # Update stats with failure
                     if stats_callback:
                         stats_callback({
                             'total_chunks': total_units,
-                            'completed_chunks': i,
-                            'failed_chunks': failed_count
+                            'completed_chunks': shared_state['completed_count'],
+                            'failed_chunks': shared_state['failed_count'],
                         })
+                return None
+
+            async def _segment_worker(segment_pairs: List[Tuple[int, TranslationUnit]]) -> None:
+                """
+                Iterate a segment sequentially. Each segment owns its own
+                `last_context` (cold start at segment boundaries — accepted
+                trade-off for chapter-level parallelism, see issue #175).
+                """
+                last_context = ""
+                for i, unit in segment_pairs:
+                    if shared_state['interrupted']:
+                        return
+                    if check_interruption_callback and check_interruption_callback():
+                        async with state_lock:
+                            shared_state['interrupted'] = True
+                        if log_callback:
+                            log_callback("translation_interrupted",
+                                f"Translation interrupted at unit {i+1}/{total_units}")
+                        return
+                    translated = await _translate_unit(i, unit, last_context)
+                    if translated:
+                        last_context = (
+                            translated[-200:] if len(translated) > 200 else translated
+                        )
+
+            if segments:
+                await asyncio.gather(*[_segment_worker(seg) for seg in segments])
+
+            failed_count = shared_state['failed_count']
+
+            if shared_state['interrupted']:
+                # Mirror the pre-parallel interrupt path: save partial output
+                # for TXT/SRT (EPUB partial output may not be valid), mark the
+                # job paused, and report failure.
+                if self.adapter.format_name in ['txt', 'srt']:
+                    try:
+                        if log_callback:
+                            log_callback("reconstruct_partial",
+                                "Saving partial output before interruption")
+                        output_bytes = await self.adapter.reconstruct_output(
+                            bilingual=bilingual_output
+                        )
+                        with open(self.adapter.output_file_path, 'wb') as f:
+                            f.write(output_bytes)
+                    except Exception as e:
+                        if log_callback:
+                            log_callback("reconstruct_partial_failed",
+                                f"Could not save partial output: {str(e)}")
+                self.checkpoint_manager.mark_paused(self.translation_id)
+                return False
 
             # 7. Reconstruct output file
             if log_callback:

@@ -15,6 +15,7 @@ from src.utils.file_utils import get_unique_output_path, find_partial_output_pat
 from src.core.llm import OpenRouterProvider
 from src.core.llm.exceptions import RateLimitError
 from src.config import AUTO_PAUSE_ON_RATE_LIMIT, RATE_LIMIT_AUTO_RESUME_DELAY
+import src.config as _live_config  # for live reads of reloadable values
 from src.core.adapters import translate_file
 from src.tts.tts_config import TTSConfig
 from src.utils.notifier import notify, EVENT_SUCCESS, EVENT_FAILURE, EVENT_INTERRUPTION
@@ -359,7 +360,8 @@ async def perform_actual_translation(translation_id, config, state_manager, outp
             auto_adjust_context=config.get('auto_adjust_context', True),
             min_chunk_size=config.get('min_chunk_size', 5),
             prompt_options=config.get('prompt_options', {}),
-            bilingual_output=config.get('bilingual_output', False)
+            bilingual_output=config.get('bilingual_output', False),
+            parallel_requests=config.get('parallel_requests') or _live_config.PARALLEL_REQUESTS,
         )
 
         # If an EPUB translation was paused, the file was saved with a `[partial NN%]`

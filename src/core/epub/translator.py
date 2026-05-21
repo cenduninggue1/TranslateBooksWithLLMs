@@ -10,6 +10,7 @@ unified generic orchestrator approach:
 
 Refactored to use the same pattern as DOCX for consistency and maintainability.
 """
+import asyncio
 import os
 import zipfile
 import tempfile
@@ -60,6 +61,7 @@ async def translate_epub_file(
     max_tokens_per_chunk: int = MAX_TOKENS_PER_CHUNK,
     max_attempts: int = None,
     bilingual: bool = False,
+    parallel_requests: int = 1,
 ) -> None:
     """
     Translate an EPUB file using LLM with generic orchestrator.
@@ -194,7 +196,8 @@ async def translate_epub_file(
                 stats_callback=stats_callback,
                 check_interruption_callback=check_interruption_callback,
                 prompt_options=prompt_options,
-                restored_docs=restored_docs
+                restored_docs=restored_docs,
+                parallel_requests=parallel_requests,
             )
 
             # 4. Save translated files
@@ -749,6 +752,36 @@ def _precount_chunks_draft(doc_root, max_tokens_per_chunk: int) -> int:
         return 0
 
 
+def _read_partial_chunk_index(
+    checkpoint_manager: Any,
+    translation_id: str,
+    content_href: str,
+) -> int:
+    """
+    Quickly read just the `current_chunk_index` field from an xhtml partial
+    state JSON, without going through `load_xhtml_partial_state` (which logs
+    a noisy "Partial state loaded..." line per file at startup).
+
+    Returns 0 when the state file is missing, unreadable, or invalid.
+    """
+    import json
+    try:
+        states_dir = checkpoint_manager.uploads_dir / translation_id / "xhtml_states"
+    except AttributeError:
+        return 0
+    safe_filename = content_href.replace('/', '_').replace('\\', '_')
+    state_file = states_dir / f"{safe_filename}.json"
+    if not state_file.exists():
+        return 0
+    try:
+        with open(state_file, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+    except Exception:
+        return 0
+    value = data.get('current_chunk_index', 0)
+    return int(value) if isinstance(value, int) else 0
+
+
 async def _process_all_content_files(
     content_files: list,
     opf_dir: str,
@@ -767,7 +800,8 @@ async def _process_all_content_files(
     stats_callback: Optional[Callable] = None,
     check_interruption_callback: Optional[Callable] = None,
     prompt_options: Optional[Dict] = None,
-    restored_docs: Optional[Dict[str, etree._Element]] = None
+    restored_docs: Optional[Dict[str, etree._Element]] = None,
+    parallel_requests: int = 1,
 ) -> Dict:
     """
     Process all XHTML content files using GenericTranslationOrchestrator.
@@ -817,14 +851,43 @@ async def _process_all_content_files(
     # Accumulate translation statistics
     accumulated_stats = TranslationMetrics()
 
-    # Track global chunk progress
+    # Track global chunk progress. We count chunks from:
+    #   1. files fully restored from disk (translated_files/*.xhtml), and
+    #   2. partial files still in flight from a previous interrupted run,
+    #      whose xhtml_states/<file_href>.json carries current_chunk_index.
+    # Counting only (1) makes the progress bar visibly drop on resume: the
+    # user saw "90 done" before interruption, then "83 done" on resume,
+    # because the 7 chunks done inside partial files weren't counted.
+    #
+    # `initial_partial_done` records per-file how many chunks were already
+    # counted from partial state at init time. The per-file commit/stats
+    # callbacks subtract this baseline so we don't double-count: the xhtml
+    # translator's stats object is restored from the partial state, so its
+    # reported `completed_chunks` is cumulative across resumes.
     completed_chunks_global = 0
-    for idx in range(resume_from_index):
-        if idx < len(chunks_per_file):
-            completed_chunks_global += chunks_per_file[idx]
+    initial_partial_done: Dict[int, int] = {}
+    # A fully-restored file (saved to disk by `_save_checkpoint`) has been
+    # through both phases when refinement is on, so its "weight" in the
+    # global progress is 2*N for refinement, otherwise N.
+    full_file_weight = 2 if enable_refinement else 1
+    for idx, content_href in enumerate(content_files):
+        file_path = os.path.normpath(os.path.join(opf_dir, content_href))
+        chunks_for_file = chunks_per_file[idx] if idx < len(chunks_per_file) else 0
+        if file_path in parsed_xhtml_docs:
+            completed_chunks_global += chunks_for_file * full_file_weight
+        elif checkpoint_manager and translation_id:
+            partial_done = _read_partial_chunk_index(
+                checkpoint_manager, translation_id, content_href
+            )
+            # Cap at the precounted size so a stale state file with a higher
+            # index than the current chunking would yield can't inflate.
+            partial_done = min(partial_done, chunks_for_file)
+            if partial_done > 0:
+                completed_chunks_global += partial_done
+                initial_partial_done[idx] = partial_done
 
     # Send initial stats if resuming (to update UI immediately)
-    if stats_callback and resume_from_index > 0:
+    if stats_callback and (parsed_xhtml_docs or completed_chunks_global > 0):
         stats_callback({
             'total_chunks': effective_total_chunks,
             'completed_chunks': completed_chunks_global,
@@ -832,125 +895,271 @@ async def _process_all_content_files(
             'total_tokens': 0
         })
 
-    for file_idx, content_href in enumerate(content_files):
-        # Check for interruption
-        if check_interruption_callback and check_interruption_callback():
-            was_interrupted = True
-            if log_callback:
-                log_callback("epub_translation_interrupted",
-                             f"Translation interrupted at file {file_idx + 1}/{total_files}")
-            break
+    # Shared state mutated by concurrent file workers when parallel_requests > 1.
+    # When parallel_requests == 1 the semaphore admits one coroutine at a time
+    # and the lock is uncontended, so this is also the sequential code path.
+    #
+    # `per_file_completed[file_idx]` holds the latest known "completed chunks"
+    # for each file. The progress reported to the UI is always the sum across
+    # all files. Each file's value only ever grows (xhtml_translator reports
+    # `stats.processed_chunks` monotonically per chunk, and on commit we lock
+    # in the final value), so the sum is monotonic too.
+    state_lock = asyncio.Lock()
+    per_file_completed: Dict[int, int] = {}
+    for idx, content_href in enumerate(content_files):
+        file_path = os.path.normpath(os.path.join(opf_dir, content_href))
+        if file_path in parsed_xhtml_docs:
+            # Fully restored from disk: credit the full chunk count (doubled
+            # if refinement was part of the workflow, since the saved file
+            # has been through both phases).
+            chunks_for_file = chunks_per_file[idx] if idx < len(chunks_per_file) else 0
+            per_file_completed[idx] = chunks_for_file * full_file_weight
+        elif idx in initial_partial_done:
+            per_file_completed[idx] = initial_partial_done[idx]
 
-        # Skip if already processed (resume)
-        if file_idx < resume_from_index:
-            completed_files += 1
-            continue
+    shared = {
+        'per_file_completed': per_file_completed,
+        'completed_files': completed_files,
+        'failed_files': failed_files,
+        'was_interrupted': False,
+    }
+    file_semaphore = asyncio.Semaphore(max(1, parallel_requests))
+
+    async def _process_one_file(file_idx: int, content_href: str) -> None:
+        # Short-circuit if another worker has already detected interruption.
+        if shared['was_interrupted']:
+            return
+        if check_interruption_callback and check_interruption_callback():
+            shared['was_interrupted'] = True
+            if log_callback:
+                log_callback(
+                    "epub_translation_interrupted",
+                    f"Translation interrupted at file {file_idx + 1}/{total_files}"
+                )
+            return
 
         file_path = os.path.normpath(os.path.join(opf_dir, content_href))
         chunks_in_this_file = chunks_per_file[file_idx] if file_idx < len(chunks_per_file) else 0
 
-        if log_callback:
-            log_callback("epub_file_translate_start",
-                         f"Translating file {file_idx + 1}/{total_files}: {content_href} ({chunks_in_this_file} chunks)")
+        # Skip if this file is already in parsed_xhtml_docs (restored from a
+        # previous run's `translated_files/` on disk). Disk presence is the
+        # source of truth — the legacy scalar `resume_from_index` cannot
+        # express the holes that parallel out-of-order commits create.
+        if file_path in parsed_xhtml_docs:
+            return
 
-        # Create stats wrapper that reports global statistics
-        # NOTE: completed_chunks_global represents chunks from ALL previous files (not including current)
+        if log_callback:
+            log_callback(
+                "epub_file_translate_start",
+                f"Translating file {file_idx + 1}/{total_files}: {content_href} "
+                f"({chunks_in_this_file} chunks)"
+            )
+
+        # Per-chunk progress callback. xhtml_translator passes
+        # `stats.to_dict()` whose `completed_chunks` field is monotonic per
+        # file (it equals `processed_chunks` during translation and
+        # `total + refinement_chunks_completed` during refinement, i.e. 0..N
+        # then N..2N for two-phase workflows). We just publish that value
+        # for this file and report the global sum.
+        baseline_for_file = initial_partial_done.get(file_idx, 0)
+        # When a file resumes from a partial state, its restored `stats`
+        # object is cumulative across the previous run, so to_dict already
+        # accounts for the previously-done chunks — we credited those at
+        # init, so we must NOT credit them again. We do that here by simply
+        # using the file_stats value as-is (which already includes them).
+        # The init baseline is removed from the dict to avoid double-counting.
+        if baseline_for_file > 0:
+            shared['per_file_completed'].pop(file_idx, None)
+
         def file_stats_wrapper(file_stats_dict: Dict):
-            """Convert file-level stats to global stats by merging with accumulated stats"""
             if not stats_callback:
                 return
-
-            # Calculate global completed chunks:
-            # completed_chunks_global = chunks from previous files (already updated)
-            # current_file_completed = chunks completed in current file (reported by xhtml_translator)
-            current_file_completed = file_stats_dict.get('completed_chunks', 0)
-            global_completed = completed_chunks_global + current_file_completed
-
-            # Handle refinement mode: when refinement is enabled, the total work doubles
-            # (translation phase + refinement phase), so we need to use the doubled total
-            enable_refinement = file_stats_dict.get('enable_refinement', False)
-            effective_total = total_chunks * 2 if enable_refinement else total_chunks
-
-            # Report combined stats (accumulated + current file)
+            enable_refinement_local = file_stats_dict.get('enable_refinement', False)
+            # Cap the per-file value at the theoretical max for this file
+            # (N for translation-only, 2*N when refinement is enabled). This
+            # is a safety net against an inflated `completed_chunks` field in
+            # a stale or corrupted xhtml_state JSON — a single rogue value
+            # must not be able to push the global sum past 100 %.
+            file_cap = chunks_in_this_file * (2 if enable_refinement_local else 1)
+            file_completed = min(file_stats_dict.get('completed_chunks', 0), file_cap)
+            # Each file_idx is owned by exactly one coroutine, so no lock is
+            # needed on the dict entry itself. Guard with max() so a callback
+            # that arrives with a stale value (e.g. mid-retry) can never make
+            # the per-file counter regress, which would make the global sum
+            # appear to go backwards in the UI.
+            prev = shared['per_file_completed'].get(file_idx, 0)
+            shared['per_file_completed'][file_idx] = max(prev, file_completed)
+            global_completed = sum(shared['per_file_completed'].values())
+            effective_total = total_chunks * 2 if enable_refinement_local else total_chunks
+            # Final safety clamp at the global level (covers the corner case
+            # where sums of per-file values can still drift past the global
+            # ceiling under race conditions in parallel mode).
+            global_completed = min(global_completed, effective_total)
             stats_callback({
                 'total_chunks': effective_total,
                 'completed_chunks': global_completed,
                 'failed_chunks': accumulated_stats.failed_chunks + file_stats_dict.get('failed_chunks', 0),
-                'total_tokens': accumulated_stats.total_tokens_processed + accumulated_stats.total_tokens_generated + file_stats_dict.get('total_tokens_processed', 0) + file_stats_dict.get('total_tokens_generated', 0)
+                'total_tokens': (
+                    accumulated_stats.total_tokens_processed
+                    + accumulated_stats.total_tokens_generated
+                    + file_stats_dict.get('total_tokens_processed', 0)
+                    + file_stats_dict.get('total_tokens_generated', 0)
+                ),
             })
 
-        # Translate using orchestrator WITH checkpoint support
-        doc_root, success, file_stats = await _translate_single_xhtml_file(
-            file_path=file_path,
-            content_href=content_href,
-            source_language=source_language,
-            target_language=target_language,
-            model_name=model_name,
-            llm_client=llm_client,
-            max_tokens_per_chunk=max_tokens_per_chunk,
-            max_attempts=max_attempts,
-            context_manager=context_manager,
-            log_callback=log_callback,
-            prompt_options=prompt_options,
-            stats_callback=file_stats_wrapper,
-            checkpoint_manager=checkpoint_manager,
-            translation_id=translation_id,
-            check_interruption_callback=check_interruption_callback,
-            global_total_chunks=total_chunks,
-            global_completed_chunks=completed_chunks_global,
-        )
-
-        # Update global chunk counter
-        completed_chunks_global += chunks_in_this_file
-
-        # Accumulate statistics
-        if file_stats:
-            accumulated_stats.merge(file_stats)
-
-        # Report stats if callback provided
-        if stats_callback and file_stats:
-            # Calculate effective completed chunks
-            # When refinement is enabled, we need to account for both phases
-            if enable_refinement:
-                # Calculate base completed chunks (without refinement doubling)
-                base_completed = accumulated_stats.successful_first_try + accumulated_stats.successful_after_retry
-                # Add refinement progress if any files have completed refinement
-                # Note: accumulated_stats.refinement_chunks_completed only tracks current file's refinement
-                # We need to add completed_chunks_global (which counts base chunks) + any refinement progress
-                effective_completed = completed_chunks_global + accumulated_stats.refinement_chunks_completed
-            else:
-                effective_completed = completed_chunks_global
-            
-            stats_callback({
-                'total_chunks': effective_total_chunks,
-                'completed_chunks': effective_completed,
-                'failed_chunks': accumulated_stats.failed_chunks,
-                'total_tokens': accumulated_stats.total_tokens_processed + accumulated_stats.total_tokens_generated
-            })
-
-        # Save the document if translation succeeded
-        if success and doc_root is not None:
-            parsed_xhtml_docs[file_path] = doc_root
-            completed_files += 1
-        elif not success and doc_root is not None:
-            # Save original document if translation failed
-            parsed_xhtml_docs[file_path] = doc_root
-            failed_files += 1
-            if log_callback:
-                log_callback("epub_file_translate_failed",
-                             f"Failed to translate file {file_idx + 1}/{total_files}: {content_href}")
-        else:
-            failed_files += 1
-
-        # Save checkpoint
-        if checkpoint_manager and translation_id and success and doc_root is not None:
-            await _save_checkpoint(
-                checkpoint_manager, translation_id, file_idx, content_href,
-                doc_root, file_path, temp_dir, log_callback,
-                total_chunks=total_chunks,
-                completed_chunks=completed_chunks_global,
-                failed_chunks=accumulated_stats.failed_chunks
+        async with file_semaphore:
+            # xhtml_translator builds its periodic global_stats log line as
+            # `global_completed_chunks + stats.completed`. Pass the live sum
+            # of OTHER files' progress (everyone except us, since our own
+            # contribution is the `stats.completed` half) so the log line
+            # reflects reality. Best-effort cosmetic — this only feeds the
+            # printed "Updated main checkpoint with global stats" line.
+            global_baseline = sum(
+                v for k, v in shared['per_file_completed'].items()
+                if k != file_idx
             )
+            doc_root, success, file_stats = await _translate_single_xhtml_file(
+                file_path=file_path,
+                content_href=content_href,
+                source_language=source_language,
+                target_language=target_language,
+                model_name=model_name,
+                llm_client=llm_client,
+                max_tokens_per_chunk=max_tokens_per_chunk,
+                max_attempts=max_attempts,
+                context_manager=context_manager,
+                log_callback=log_callback,
+                prompt_options=prompt_options,
+                stats_callback=file_stats_wrapper,
+                checkpoint_manager=checkpoint_manager,
+                translation_id=translation_id,
+                check_interruption_callback=check_interruption_callback,
+                global_total_chunks=total_chunks,
+                global_completed_chunks=global_baseline,
+            )
+
+        # Compute the file's final "completed_chunks" value the same way
+        # xhtml_translator does in to_dict(): processed_chunks during the
+        # translation phase, plus refinement progress in two-phase workflows.
+        # If the file errored before producing stats, fall back to whatever
+        # the wrapper last published (could be 0 if no chunks ran).
+        if file_stats is not None:
+            final_file_completed = file_stats.processed_chunks
+            if file_stats.enable_refinement:
+                # Two-phase workflow: translation done counts the full N once,
+                # refinement progress stacks on top (0..N more).
+                final_file_completed = (
+                    file_stats.total_chunks
+                    + file_stats.refinement_chunks_completed
+                )
+                effective_cap = chunks_in_this_file * 2
+            else:
+                effective_cap = chunks_in_this_file
+            final_file_completed = min(final_file_completed, effective_cap)
+        else:
+            # Errored file: keep whatever the wrapper had published (or 0).
+            final_file_completed = shared['per_file_completed'].get(file_idx, 0)
+
+        # Commit per-file results under the lock so concurrent workers don't
+        # clobber each other's accumulated stats or completed_files counter.
+        async with state_lock:
+            # Lock in the file's final progress. This value must be >= the
+            # wrapper's last publication, otherwise the sum would regress.
+            previous = shared['per_file_completed'].get(file_idx, 0)
+            shared['per_file_completed'][file_idx] = max(previous, final_file_completed)
+
+            if file_stats:
+                accumulated_stats.merge(file_stats)
+
+            if success and doc_root is not None:
+                parsed_xhtml_docs[file_path] = doc_root
+                shared['completed_files'] += 1
+            elif not success and doc_root is not None:
+                parsed_xhtml_docs[file_path] = doc_root
+                shared['failed_files'] += 1
+                if log_callback:
+                    log_callback(
+                        "epub_file_translate_failed",
+                        f"Failed to translate file {file_idx + 1}/{total_files}: {content_href}"
+                    )
+            else:
+                shared['failed_files'] += 1
+
+            if stats_callback and file_stats:
+                global_completed = min(
+                    sum(shared['per_file_completed'].values()),
+                    effective_total_chunks,
+                )
+                stats_callback({
+                    'total_chunks': effective_total_chunks,
+                    'completed_chunks': global_completed,
+                    'failed_chunks': accumulated_stats.failed_chunks,
+                    'total_tokens': (
+                        accumulated_stats.total_tokens_processed
+                        + accumulated_stats.total_tokens_generated
+                    ),
+                })
+
+            if checkpoint_manager and translation_id and success and doc_root is not None:
+                await _save_checkpoint(
+                    checkpoint_manager, translation_id, file_idx, content_href,
+                    doc_root, file_path, temp_dir, log_callback,
+                    total_chunks=effective_total_chunks,
+                    completed_chunks=min(
+                        sum(shared['per_file_completed'].values()),
+                        effective_total_chunks,
+                    ),
+                    failed_chunks=accumulated_stats.failed_chunks
+                )
+
+    await asyncio.gather(*[
+        _process_one_file(file_idx, content_href)
+        for file_idx, content_href in enumerate(content_files)
+    ])
+
+    # Publish final counters back to the outer scope.
+    completed_chunks_global = min(
+        sum(shared['per_file_completed'].values()),
+        effective_total_chunks,
+    )
+    completed_files = shared['completed_files']
+    failed_files = shared['failed_files']
+    was_interrupted = shared['was_interrupted']
+
+    # Sync the live counter to the DB unconditionally. The per-file
+    # _save_checkpoint only updates progress when a file is fully done, so
+    # files interrupted mid-stream leave the DB pointing at an older value.
+    # The "Paused Translations" panel reads from this row, so without this
+    # update the user sees a stale number much lower than what's really done.
+    if checkpoint_manager and translation_id:
+        try:
+            checkpoint_manager.db.update_job_progress(
+                translation_id=translation_id,
+                total_chunks=effective_total_chunks,
+                completed_chunks=completed_chunks_global,
+                failed_chunks=accumulated_stats.failed_chunks,
+            )
+        except Exception as e:
+            if log_callback:
+                log_callback(
+                    "epub_progress_sync_failed",
+                    f"⚠️ Could not sync final progress to DB: {e}"
+                )
+
+    # Send one last stats_callback with the final aggregate so the UI snaps
+    # to the canonical end value (covers the case where the last commit
+    # happened to be a file with file_stats=None, which would not have
+    # fired stats_callback on commit).
+    if stats_callback:
+        stats_callback({
+            'total_chunks': effective_total_chunks,
+            'completed_chunks': completed_chunks_global,
+            'failed_chunks': accumulated_stats.failed_chunks,
+            'total_tokens': (
+                accumulated_stats.total_tokens_processed
+                + accumulated_stats.total_tokens_generated
+            ),
+        })
 
     # Final progress
     return {

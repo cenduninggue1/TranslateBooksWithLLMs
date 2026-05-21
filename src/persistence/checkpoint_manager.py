@@ -247,7 +247,11 @@ class CheckpointManager:
             completed = progress.get('completed_chunks', 0)
 
             if total > 0:
-                job['progress_percentage'] = int((completed / total) * 100)
+                # Clamp to [0, 100] so a stale/inconsistent DB row (e.g. a
+                # transient overshoot in the in-flight write path) cannot
+                # surface as "200 %" on the Paused Translations card.
+                pct = int((completed / total) * 100)
+                job['progress_percentage'] = max(0, min(100, pct))
             else:
                 job['progress_percentage'] = 0
 
@@ -815,17 +819,14 @@ class CheckpointManager:
 
             print(f"Partial state saved: {state_file} (chunk {state.current_chunk_index}/{len(state.chunks)})")
 
-            # Update main checkpoint progress with global_stats if available
-            # This ensures the UI shows correct progress across all XHTML files
-            if state.global_stats:
-                self.db.update_job_progress(
-                    translation_id=translation_id,
-                    current_chunk_index=None,  # Don't update chunk index
-                    total_chunks=state.global_stats.get('total_chunks'),
-                    completed_chunks=state.global_stats.get('completed_chunks'),
-                    failed_chunks=state.global_stats.get('failed_chunks')
-                )
-                print(f"Updated main checkpoint with global stats: {state.global_stats.get('completed_chunks')}/{state.global_stats.get('total_chunks')} chunks")
+            # Note: we intentionally do NOT mirror state.global_stats into the
+            # main job row here. In parallel EPUB mode multiple XHTML workers
+            # call this concurrently with stale snapshots of "what other files
+            # have done", which causes last-write-wins races and (when
+            # refinement is on) a total_chunks/completed_chunks mismatch that
+            # makes the UI display > 100 %. The parent orchestrator owns that
+            # row update under a single lock — see _process_all_content_files
+            # in core/epub/translator.py.
 
             return True
         except Exception as e:

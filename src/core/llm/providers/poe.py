@@ -17,11 +17,27 @@ from typing import Optional, Dict, Any, Callable, List, Union
 import httpx
 import asyncio
 import json
+import sys
 
 from src.config import REQUEST_TIMEOUT, MAX_TRANSLATION_ATTEMPTS, TEMPERATURE
 from ..base import LLMProvider, LLMResponse
 from ..exceptions import ContextOverflowError
 from ..rate_limit_handler import handle_rate_limit
+
+
+def _safe_print(msg: str) -> None:
+    """Print msg, replacing characters the active stdout codec can't encode.
+
+    On Windows the default console codec is cp1252, which cannot encode the
+    emoji this provider uses for log lines. Without this guard, the raw
+    print() raises UnicodeEncodeError; the outer ``except Exception`` then
+    swallows successful API calls and reports a phantom "Unknown Error".
+    """
+    encoding = getattr(sys.stdout, "encoding", None) or "utf-8"
+    try:
+        print(msg)
+    except UnicodeEncodeError:
+        print(msg.encode(encoding, errors="replace").decode(encoding, errors="replace"))
 
 
 class PoeProvider(LLMProvider):
@@ -281,14 +297,14 @@ class PoeProvider(LLMProvider):
                 models.sort(key=lambda x: (x.get("owned_by", "zzz").lower(), x.get("id", "").lower()))
 
                 if models:
-                    print(f"✅ Poe: Loaded {len(models)} text models from API (filtered from {len(models_data)} total)")
+                    _safe_print(f"✅ Poe: Loaded {len(models)} text models from API (filtered from {len(models_data)} total)")
                     return models
 
             # API error - fall back to static list
-            print(f"⚠️ Poe API returned status {response.status_code}, using fallback models")
+            _safe_print(f"⚠️ Poe API returned status {response.status_code}, using fallback models")
 
         except Exception as e:
-            print(f"⚠️ Poe: Error fetching models: {e}, using fallback list")
+            _safe_print(f"⚠️ Poe: Error fetching models: {e}, using fallback list")
 
         # Fallback to static list
         return self._get_fallback_models()
@@ -363,13 +379,13 @@ class PoeProvider(LLMProvider):
 
                 # Handle specific error codes
                 if response.status_code == 401:
-                    print(f"❌ Poe: Invalid API key!")
-                    print(f"   Get your API key at: https://poe.com/api_key")
+                    _safe_print(f"❌ Poe: Invalid API key!")
+                    _safe_print(f"   Get your API key at: https://poe.com/api_key")
                     return None
 
                 if response.status_code == 402:
-                    print(f"❌ Poe: Insufficient points/credits!")
-                    print(f"   Check your subscription at: https://poe.com/subscribe")
+                    _safe_print(f"❌ Poe: Insufficient points/credits!")
+                    _safe_print(f"   Check your subscription at: https://poe.com/subscribe")
                     return None
 
                 if response.status_code == 429:
@@ -383,7 +399,7 @@ class PoeProvider(LLMProvider):
                 result = response.json()
 
                 if "choices" not in result or len(result["choices"]) == 0:
-                    print(f"⚠️ Poe: Unexpected response format: {result}")
+                    _safe_print(f"⚠️ Poe: Unexpected response format: {result}")
                     return None
 
                 response_text = result["choices"][0].get("message", {}).get("content", "")
@@ -397,7 +413,7 @@ class PoeProvider(LLMProvider):
                 PoeProvider._session_tokens["prompt"] += prompt_tokens
                 PoeProvider._session_tokens["completion"] += completion_tokens
 
-                print(f"💬 Poe ({self.model}): {prompt_tokens}+{completion_tokens} tokens")
+                _safe_print(f"💬 Poe ({self.model}): {prompt_tokens}+{completion_tokens} tokens")
 
                 # Call cost callback if set
                 if PoeProvider._cost_callback:
@@ -409,7 +425,7 @@ class PoeProvider(LLMProvider):
                             "total_completion_tokens": PoeProvider._session_tokens["completion"],
                         })
                     except Exception as cb_err:
-                        print(f"⚠️ Cost callback error: {cb_err}")
+                        _safe_print(f"⚠️ Cost callback error: {cb_err}")
 
                 return LLMResponse(
                     content=response_text,
@@ -421,7 +437,7 @@ class PoeProvider(LLMProvider):
                 )
 
             except httpx.TimeoutException as e:
-                print(f"Poe API Timeout (attempt {attempt + 1}/{MAX_TRANSLATION_ATTEMPTS}): {e}")
+                _safe_print(f"Poe API Timeout (attempt {attempt + 1}/{MAX_TRANSLATION_ATTEMPTS}): {e}")
                 if attempt < MAX_TRANSLATION_ATTEMPTS - 1:
                     await asyncio.sleep(2)
                     continue
@@ -435,12 +451,12 @@ class PoeProvider(LLMProvider):
                     error_message = f"{e} - {error_body}"
 
                 if e.response.status_code == 404:
-                    print(f"❌ Poe: Bot '{self.model}' not found!")
-                    print(f"   Note: Only public bots are accessible via API")
-                    print(f"   Find bots at: https://poe.com/explore")
+                    _safe_print(f"❌ Poe: Bot '{self.model}' not found!")
+                    _safe_print(f"   Note: Only public bots are accessible via API")
+                    _safe_print(f"   Find bots at: https://poe.com/explore")
                 elif e.response.status_code not in [401, 402, 429]:  # Already handled above
-                    print(f"Poe API HTTP Error (attempt {attempt + 1}/{MAX_TRANSLATION_ATTEMPTS}): {e}")
-                    print(f"Response details: Status {e.response.status_code}, Body: {error_body}...")
+                    _safe_print(f"Poe API HTTP Error (attempt {attempt + 1}/{MAX_TRANSLATION_ATTEMPTS}): {e}")
+                    _safe_print(f"Response details: Status {e.response.status_code}, Body: {error_body}...")
 
                 # Detect context overflow errors
                 context_overflow_keywords = [
@@ -457,14 +473,14 @@ class PoeProvider(LLMProvider):
                 return None
 
             except json.JSONDecodeError as e:
-                print(f"Poe API JSON Decode Error (attempt {attempt + 1}/{MAX_TRANSLATION_ATTEMPTS}): {e}")
+                _safe_print(f"Poe API JSON Decode Error (attempt {attempt + 1}/{MAX_TRANSLATION_ATTEMPTS}): {e}")
                 if attempt < MAX_TRANSLATION_ATTEMPTS - 1:
                     await asyncio.sleep(2)
                     continue
                 return None
 
             except Exception as e:
-                print(f"Poe API Unknown Error (attempt {attempt + 1}/{MAX_TRANSLATION_ATTEMPTS}): {e}")
+                _safe_print(f"Poe API Unknown Error (attempt {attempt + 1}/{MAX_TRANSLATION_ATTEMPTS}): {e}")
                 if attempt < MAX_TRANSLATION_ATTEMPTS - 1:
                     await asyncio.sleep(2)
                     continue

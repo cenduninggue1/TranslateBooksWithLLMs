@@ -21,7 +21,8 @@ class TranslationConfig:
     target_language: str = field(default_factory=lambda: os.getenv("TARGET_LANGUAGE", "French"))
     chunk_size: int = field(default_factory=lambda: int(os.getenv("CHUNK_SIZE", "1500")))
     max_retries: int = field(default_factory=lambda: int(os.getenv("MAX_RETRIES", "3")))
-    temperature: float = field(default_factory=lambda: float(os.getenv("TEMPERATURE", "0.3")))
+    # Lowered temperature slightly for more consistent/literal translations
+    temperature: float = field(default_factory=lambda: float(os.getenv("TEMPERATURE", "0.1")))
 
     # File settings
     input_file: Optional[str] = field(default_factory=lambda: os.getenv("INPUT_FILE"))

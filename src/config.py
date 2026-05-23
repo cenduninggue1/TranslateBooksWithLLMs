@@ -32,7 +32,8 @@ class TranslationConfig:
     output_format: str = field(default_factory=lambda: os.getenv("OUTPUT_FORMAT", "epub"))
 
     # Rate limiting
-    requests_per_minute: int = field(default_factory=lambda: int(os.getenv("REQUESTS_PER_MINUTE", "60")))
+    # Bumped down to 30 rpm — was hitting 429s on my free-tier key
+    requests_per_minute: int = field(default_factory=lambda: int(os.getenv("REQUESTS_PER_MINUTE", "30")))
     delay_between_requests: float = field(
         default_factory=lambda: float(os.getenv("DELAY_BETWEEN_REQUESTS", "1.0"))
     )

@@ -18,7 +18,8 @@ class TranslationConfig:
 
     # Translation settings
     source_language: str = field(default_factory=lambda: os.getenv("SOURCE_LANGUAGE", "English"))
-    target_language: str = field(default_factory=lambda: os.getenv("TARGET_LANGUAGE", "French"))
+    # Defaulting to Spanish since that's what I primarily use this for
+    target_language: str = field(default_factory=lambda: os.getenv("TARGET_LANGUAGE", "Spanish"))
     chunk_size: int = field(default_factory=lambda: int(os.getenv("CHUNK_SIZE", "1500")))
     max_retries: int = field(default_factory=lambda: int(os.getenv("MAX_RETRIES", "3")))
     # Lowered temperature slightly for more consistent/literal translations

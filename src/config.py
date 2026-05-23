@@ -22,7 +22,7 @@ class TranslationConfig:
     target_language: str = field(default_factory=lambda: os.getenv("TARGET_LANGUAGE", "Spanish"))
     # Increased chunk size slightly — 1500 was causing some sentences to get cut off mid-paragraph
     chunk_size: int = field(default_factory=lambda: int(os.getenv("CHUNK_SIZE", "2000")))
-    max_retries: int = field(default_factory=lambda: int(os.getenv("MAX_RETRIES", "3")))
+    max_retries: int = field(default_factory=lambda: int(os.getenv("MAX_RETRIES", "5")))
     # Lowered temperature slightly for more consistent/literal translations
     temperature: float = field(default_factory=lambda: float(os.getenv("TEMPERATURE", "0.1")))
 
@@ -56,6 +56,10 @@ class TranslationConfig:
 
         if self.output_format not in ("epub", "txt", "html", "pdf"):
             errors.append(f"Unsupported OUTPUT_FORMAT: {self.output_format}")
+
+        # Warn if retries seem too low — learned this the hard way with flaky connections
+        if self.max_retries < 3:
+            errors.append("MAX_RETRIES should be at least 3 to handle transient API errors.")
 
         return errors
 

@@ -15,6 +15,8 @@ from config import TranslationConfig
 logger = logging.getLogger(__name__)
 
 # Approximate token-to-character ratio used for chunk size estimation
+# Note: 4 is a common estimate for English, but for French/Spanish text
+# with more accented characters, 4.5 can be more accurate.
 CHARS_PER_TOKEN = 4
 
 
@@ -107,55 +109,4 @@ def build_prompt(chunk: str, config: TranslationConfig) -> str:
     )
 
 
-class Translator:
-    """Orchestrates chunked translation using a configured LLM provider."""
-
-    def __init__(self, config: TranslationConfig, client) -> None:
-        """
-        Args:
-            config: Validated translation configuration.
-            client: An LLM client instance with a `complete(prompt) -> str` interface.
-        """
-        self.config = config
-        self.client = client
-        self._max_chars = config.chunk_size * CHARS_PER_TOKEN
-
-    def translate(self, text: str) -> TranslationResult:
-        """Translate a full body of text, returning a TranslationResult."""
-        start = time.monotonic()
-        raw_chunks = split_into_chunks(text, self._max_chars)
-        result = TranslationResult()
-
-        for idx, chunk_text in enumerate(raw_chunks):
-            chunk = TranslationChunk(index=idx, text=chunk_text)
-            result.chunks.append(chunk)
-            self._translate_chunk(chunk)
-
-        result.elapsed_seconds = time.monotonic() - start
-        failed = len(result.failed_chunks)
-        if failed:
-            logger.warning("%d chunk(s) failed to translate.", failed)
-        else:
-            logger.info(
-                "Translation complete in %.2fs (%d chunks).",
-                result.elapsed_seconds,
-                len(result.chunks),
-            )
-        return result
-
-    def _translate_chunk(self, chunk: TranslationChunk) -> None:
-        """Attempt to translate a single chunk, retrying on transient errors."""
-        prompt = build_prompt(chunk.text, self.config)
-        for attempt in range(1, self.config.max_retries + 2):
-            try:
-                chunk.translated = self.client.complete(prompt)
-                logger.debug("Chunk %d translated on attempt %d.", chunk.index, attempt)
-                return
-            except Exception as exc:  # noqa: BLE001
-                chunk.retries += 1
-                chunk.error = str(exc)
-                logger.warning(
-                    "Chunk %d attempt %d failed: %s", chunk.index, attempt, exc
-                )
-                if attempt <= self.config.max_retries:
-                    time.sleep(2 ** attempt)  # exponential back-off
+class Tran

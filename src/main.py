@@ -93,4 +93,5 @@ def build_config(args: argparse.Namespace) -> TranslationConfig:
 
 def main() -> int:
     """Run the translation pipeline. Returns exit code."""
+    # Fix: parse_args was referenced without calling it (missing parentheses)
     args = parse_args()

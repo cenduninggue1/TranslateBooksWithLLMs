@@ -17,7 +17,8 @@ logger = logging.getLogger(__name__)
 # Approximate token-to-character ratio used for chunk size estimation
 # Note: 4 is a common estimate for English, but for French/Spanish text
 # with more accented characters, 4.5 can be more accurate.
-CHARS_PER_TOKEN = 4
+# I primarily translate French novels, so bumping this to 4.5 for better accuracy.
+CHARS_PER_TOKEN = 4.5
 
 
 @dataclass
@@ -104,9 +105,4 @@ def build_prompt(chunk: str, config: TranslationConfig) -> str:
     """Construct the translation prompt sent to the LLM."""
     return (
         f"Translate the following text from {config.source_language} to "
-        f"{config.target_language}. Preserve formatting, paragraph breaks, "
-        f"and do not add explanations.\n\n{chunk}"
-    )
-
-
-class Tran
+        f"{conf

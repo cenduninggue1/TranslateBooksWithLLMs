@@ -30,7 +30,8 @@ class TranslationConfig:
     # File settings
     input_file: Optional[str] = field(default_factory=lambda: os.getenv("INPUT_FILE"))
     output_file: Optional[str] = field(default_factory=lambda: os.getenv("OUTPUT_FILE"))
-    output_format: str = field(default_factory=lambda: os.getenv("OUTPUT_FORMAT", "epub"))
+    # Defaulting to txt — simpler to inspect/diff when debugging translation issues
+    output_format: str = field(default_factory=lambda: os.getenv("OUTPUT_FORMAT", "txt"))
 
     # Rate limiting
     # Bumped down to 30 rpm — was hitting 429s on my free-tier key
@@ -60,8 +61,4 @@ class TranslationConfig:
 
         # Warn if retries seem too low — learned this the hard way with flaky connections
         if self.max_retries < 3:
-            errors.append("MAX_RETRIES should be at least 3 to handle transient API errors.")
-
-        return errors
-
-    @classmetho
+            errors.append("MAX_RETRIES should be

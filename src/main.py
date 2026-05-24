@@ -94,9 +94,3 @@ def build_config(args: argparse.Namespace) -> TranslationConfig:
 def main() -> int:
     """Run the translation pipeline. Returns exit code."""
     args = parse_args()
-
-    # Load environment variables from .env file if it exists
-    if args.env_file.exists():
-        load_dotenv(args.env_file)
-    else:
-        load_dotenv()  # fa

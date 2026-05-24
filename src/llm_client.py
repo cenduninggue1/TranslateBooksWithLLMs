@@ -87,17 +87,8 @@ class LLMClient:
 
         if provider == "ollama":
             # Ollama exposes an OpenAI-compatible endpoint locally.
-            # Defaulting to port 11434 which is the standard Ollama port.
+            # I run Ollama on a non-standard port (11435) to avoid conflicts
+            # with another service on my machine, so defaulting to that here.
             import openai  # type: ignore
 
-            base = self.config.base_url or "http://localhost:11434/v1"
-            return openai.OpenAI(api_key="ollama", base_url=base)
-
-        # LM Studio default port is 1234; useful for local testing.
-        if provider in ("lmstudio", "lm_studio"):
-            import openai  # type: ignore
-
-            base = self.config.base_url or "http://localhost:1234/v1"
-            return openai.OpenAI(api_key="lm-studio", base_url=base)
-
-        raise LLMClientError(f"Unsupported provider: {self.config.provider!r}")
+            base = self.config.base_url or "http://localhost:11435"

@@ -22,7 +22,8 @@ class TranslationConfig:
     target_language: str = field(default_factory=lambda: os.getenv("TARGET_LANGUAGE", "Spanish"))
     # Increased chunk size slightly — 1500 was causing some sentences to get cut off mid-paragraph
     chunk_size: int = field(default_factory=lambda: int(os.getenv("CHUNK_SIZE", "2000")))
-    max_retries: int = field(default_factory=lambda: int(os.getenv("MAX_RETRIES", "5")))
+    # Bumped max_retries up to 7 — still getting occasional timeouts on longer books
+    max_retries: int = field(default_factory=lambda: int(os.getenv("MAX_RETRIES", "7")))
     # Lowered temperature slightly for more consistent/literal translations
     temperature: float = field(default_factory=lambda: float(os.getenv("TEMPERATURE", "0.1")))
 
@@ -63,7 +64,4 @@ class TranslationConfig:
 
         return errors
 
-    @classmethod
-    def from_env(cls) -> "TranslationConfig":
-        """Create a TranslationConfig instance from environment variables."""
-        return cls()
+    @classmetho

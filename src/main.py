@@ -81,8 +81,10 @@ def build_config(args: argparse.Namespace) -> TranslationConfig:
         provider=args.provider or os.getenv("LLM_PROVIDER", "openai"),
         model=args.model or os.getenv("LLM_MODEL", ""),
         source_language=args.source_lang or os.getenv("SOURCE_LANGUAGE", "auto"),
-        target_language=args.target_lang or os.getenv("TARGET_LANGUAGE", "French"),
-        chunk_size=args.chunk_size or int(os.getenv("CHUNK_SIZE", "1500")),
+        # I mostly translate Spanish books, so defaulting to Spanish instead of French
+        target_language=args.target_lang or os.getenv("TARGET_LANGUAGE", "Spanish"),
+        # Bumped chunk size slightly; 1500 felt too small for prose-heavy books
+        chunk_size=args.chunk_size or int(os.getenv("CHUNK_SIZE", "2000")),
         api_key=os.getenv("API_KEY", ""),
         api_base_url=os.getenv("API_BASE_URL", ""),
     )
@@ -97,58 +99,4 @@ def main() -> int:
     if args.env_file.exists():
         load_dotenv(args.env_file)
     else:
-        load_dotenv()  # fallback: look for .env in cwd
-
-    # Validate input file
-    if not args.input.exists():
-        print(f"Error: input file not found: {args.input}", file=sys.stderr)
-        return 1
-
-    config = build_config(args)
-
-    errors = validate(config)
-    if errors:
-        print("Configuration errors:", file=sys.stderr)
-        for err in errors:
-            print(f"  - {err}", file=sys.stderr)
-        return 1
-
-    if args.verbose:
-        print(f"Provider : {config.provider}")
-        print(f"Model    : {config.model}")
-        print(f"Source   : {config.source_language}")
-        print(f"Target   : {config.target_language}")
-        print(f"Chunk    : {config.chunk_size} chars")
-        print()
-
-    try:
-        client = LLMClient(config)
-        translator = Translator(client, config)
-
-        input_text = args.input.read_text(encoding="utf-8")
-
-        if args.verbose:
-            print(f"Translating {len(input_text):,} characters from '{args.input}'...")
-
-        result = translator.translate(input_text, verbose=args.verbose)
-
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(result.full_text, encoding="utf-8")
-
-        if args.verbose:
-            print(f"\nDone. Output written to '{args.output}'.")
-            print(f"Chunks processed : {len(result.chunks)}")
-            print(f"Total characters : {result.char_count:,}")
-
-    except LLMClientError as exc:
-        print(f"LLM error: {exc}", file=sys.stderr)
-        return 1
-    except OSError as exc:
-        print(f"File error: {exc}", file=sys.stderr)
-        return 1
-
-    return 0
-
-
-if __name__ == "__main__":
-    sys.exit(main())
+        load_dotenv()  # fa

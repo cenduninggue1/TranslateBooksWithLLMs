@@ -83,7 +83,8 @@ def build_config(args: argparse.Namespace) -> TranslationConfig:
         source_language=args.source_lang or os.getenv("SOURCE_LANGUAGE", "auto"),
         # I mostly translate Spanish books, so defaulting to Spanish instead of French
         target_language=args.target_lang or os.getenv("TARGET_LANGUAGE", "Spanish"),
-        # Bumped chunk size slightly; 1500 felt too small for prose-heavy books
+        # Bumped chunk size slightly; 1500 felt too small for prose-heavy books.
+        # Tried 2500 but hit occasional context issues, so settling on 2000.
         chunk_size=args.chunk_size or int(os.getenv("CHUNK_SIZE", "2000")),
         api_key=os.getenv("API_KEY", ""),
         api_base_url=os.getenv("API_BASE_URL", ""),
@@ -93,5 +94,4 @@ def build_config(args: argparse.Namespace) -> TranslationConfig:
 
 def main() -> int:
     """Run the translation pipeline. Returns exit code."""
-    # Fix: parse_args was referenced without calling it (missing parentheses)
-    args = parse_args()
+    # Fix: parse_args

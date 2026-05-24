@@ -87,62 +87,17 @@ class LLMClient:
 
         if provider == "ollama":
             # Ollama exposes an OpenAI-compatible endpoint locally.
+            # Defaulting to port 11434 which is the standard Ollama port.
             import openai  # type: ignore
 
             base = self.config.base_url or "http://localhost:11434/v1"
             return openai.OpenAI(api_key="ollama", base_url=base)
 
-        # Generic OpenAI-compatible endpoint (LM Studio, vLLM, …)
-        import openai  # type: ignore
+        # LM Studio default port is 1234; useful for local testing.
+        if provider in ("lmstudio", "lm_studio"):
+            import openai  # type: ignore
 
-        return openai.OpenAI(
-            api_key=self.config.api_key or "no-key",
-            base_url=self.config.base_url or None,
-        )
+            base = self.config.base_url or "http://localhost:1234/v1"
+            return openai.OpenAI(api_key="lm-studio", base_url=base)
 
-    def _build_prompt(self, text: str) -> str:
-        """Compose the system + user message string passed to the model."""
-        src = self.config.source_language
-        tgt = self.config.target_language
-        system = (
-            f"You are a professional literary translator. "
-            f"Translate the following text from {src} to {tgt}. "
-            f"Preserve formatting, paragraph breaks, and tone. "
-            f"Output only the translated text with no commentary."
-        )
-        return f"{system}\n\n{text}"
-
-    def _call(self, prompt: str) -> str:
-        """Dispatch to the correct provider call and return the text."""
-        provider = self.config.provider.lower()
-
-        if provider == "anthropic":
-            import anthropic  # type: ignore
-
-            message = self._client.messages.create(
-                model=self.config.model,
-                max_tokens=self.config.max_tokens,
-                messages=[{"role": "user", "content": prompt}],
-            )
-            result: Optional[str] = message.content[0].text if message.content else None
-
-        elif provider == "gemini":
-            response = self._client.generate_content(prompt)
-            result = response.text
-
-        else:
-            # OpenAI / Azure / Ollama / generic
-            completion = self._client.chat.completions.create(
-                model=self.config.model,
-                messages=[{"role": "user", "content": prompt}],
-                max_tokens=self.config.max_tokens,
-                temperature=self.config.temperature,
-            )
-            result = completion.choices[0].message.content if completion.choices else None
-
-        if not result or not result.strip():
-            raise LLMClientError(
-                f"Provider '{self.config.provider}' returned an empty response."
-            )
-
-        return result.strip()
+        raise LLMClientError(f"Unsupported provider: {self.config.provider!r}")

@@ -102,7 +102,9 @@ def split_into_chunks(text: str, max_chars: int) -> list[str]:
 
 
 def build_prompt(chunk: str, config: TranslationConfig) -> str:
-    """Construct the translation prompt sent to the LLM."""
+    """Construct the translation prompt sent to the LLM.
+
+    I added an explicit instruction to preserve paragraph breaks, since I noticed
+    the model would occasionally collapse them when translating dense prose.
+    """
     return (
-        f"Translate the following text from {config.source_language} to "
-        f"{conf

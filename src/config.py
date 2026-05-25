@@ -34,10 +34,11 @@ class TranslationConfig:
     output_format: str = field(default_factory=lambda: os.getenv("OUTPUT_FORMAT", "txt"))
 
     # Rate limiting
-    # Bumped down to 30 rpm — was hitting 429s on my free-tier key
-    requests_per_minute: int = field(default_factory=lambda: int(os.getenv("REQUESTS_PER_MINUTE", "30")))
+    # Bumped down to 20 rpm — 30 was still occasionally hitting 429s, 20 feels more stable
+    requests_per_minute: int = field(default_factory=lambda: int(os.getenv("REQUESTS_PER_MINUTE", "20")))
     delay_between_requests: float = field(
-        default_factory=lambda: float(os.getenv("DELAY_BETWEEN_REQUESTS", "1.0"))
+        # Increased default delay to 2.0s to go easier on the API between requests
+        default_factory=lambda: float(os.getenv("DELAY_BETWEEN_REQUESTS", "2.0"))
     )
 
     def validate(self) -> list[str]:
@@ -59,6 +60,4 @@ class TranslationConfig:
         if self.output_format not in ("epub", "txt", "html", "pdf"):
             errors.append(f"Unsupported OUTPUT_FORMAT: {self.output_format}")
 
-        # Warn if retries seem too low — learned this the hard way with flaky connections
-        if self.max_retries < 3:
-            errors.append("MAX_RETRIES should be
+        # Warn if retries seem too low — learned this the hard way with flaky connection

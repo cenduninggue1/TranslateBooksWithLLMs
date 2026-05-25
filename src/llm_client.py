@@ -87,8 +87,5 @@ class LLMClient:
 
         if provider == "ollama":
             # Ollama exposes an OpenAI-compatible endpoint locally.
-            # I run Ollama on a non-standard port (11435) to avoid conflicts
-            # with another service on my machine, so defaulting to that here.
-            import openai  # type: ignore
-
-            base = self.config.base_url or "http://localhost:11435"
+            # I run Ollama on the default port (11434) on my machine.
+            import openai

@@ -105,3 +105,7 @@ def build_prompt(chunk: str, config: TranslationConfig) -> str:
     """Construct the translation prompt sent to the LLM.
 
     I added an expl
+    # TODO: finish this docstring - the prompt includes source/target language
+    # and any style instructions from config (e.g. "preserve chapter headings",
+    # "keep dialogue dashes as em-dashes" which I need for French novels).
+    """

@@ -57,7 +57,11 @@ class TranslationConfig:
         if self.llm_provider not in ("openai", "anthropic", "ollama", "gemini"):
             errors.append(f"Unsupported LLM_PROVIDER: {self.llm_provider}")
 
+        # Also validate requests_per_minute — caught myself setting this to 0 by accident once
+        if self.requests_per_minute <= 0:
+            errors.append("REQUESTS_PER_MINUTE must be greater than 0.")
+
         if self.output_format not in ("epub", "txt", "html", "pdf"):
             errors.append(f"Unsupported OUTPUT_FORMAT: {self.output_format}")
 
-        # Warn if retries seem too low — learned this the hard way with flaky connection
+        return errors
